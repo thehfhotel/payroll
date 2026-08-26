@@ -99,49 +99,59 @@ RUN set -eux; \
       fi; \
     done
 
+# The oven/bun image ships a `bun` user at UID 1000; everything under /app is
+# created AS that user, or copied in with `--chown`, so the runtime user owns
+# its files from the moment they exist.
+#
+# This used to be a single `RUN chown -R bun:bun /app` at the end of the stage.
+# On overlayfs a chown is a write, so that one line copied every file under
+# /app up into a new layer — 355 MB of a 1023 MB image, its largest layer —
+# and broke the hardlinks bun's install backend uses between its store and
+# node_modules (each copied-up file becomes its own inode). Setting ownership
+# at creation time leaves nothing to rewrite. Verified by the api-boot-smoke
+# job in .github/workflows/reimbursement-ci.yml, which boots this image against
+# a postgres and checks /health and an uploads write as the runtime user.
+RUN mkdir -p /app && chown bun:bun /app
 WORKDIR /app
+USER bun
 
 ENV NODE_ENV=production \
     API_PORT=3001
 
 # Production deps only (omit dev). Re-running bun install with --production
 # against the same workspace manifest produces a slimmer node_modules.
-COPY package.json bun.lock ./
-COPY apps/api/package.json ./apps/api/
-COPY apps/web/package.json ./apps/web/
-COPY packages/shared/package.json ./packages/shared/
+COPY --chown=bun:bun package.json bun.lock ./
+COPY --chown=bun:bun apps/api/package.json ./apps/api/
+COPY --chown=bun:bun apps/web/package.json ./apps/web/
+COPY --chown=bun:bun packages/shared/package.json ./packages/shared/
 RUN bun install --frozen-lockfile --production
 
 # Application source — server entrypoint, routes, helpers.
-COPY apps/api/src ./apps/api/src
+COPY --chown=bun:bun apps/api/src ./apps/api/src
 # Workspace package source (linked into apps/api/node_modules by bun install).
-COPY packages/shared ./packages/shared
+COPY --chown=bun:bun packages/shared ./packages/shared
 
 # Generated Prisma client (already produced in the build stage).
-COPY --from=build /app/apps/api/src/generated ./apps/api/src/generated
+COPY --chown=bun:bun --from=build /app/apps/api/src/generated ./apps/api/src/generated
 
 # Schema + migrations + prisma.config.ts so `prisma migrate deploy` works at
 # container start (entrypoint script handles invocation).
-COPY apps/api/prisma ./apps/api/prisma
-COPY apps/api/prisma.config.ts ./apps/api/prisma.config.ts
+COPY --chown=bun:bun apps/api/prisma ./apps/api/prisma
+COPY --chown=bun:bun apps/api/prisma.config.ts ./apps/api/prisma.config.ts
 
 # One-off operational scripts (CSV imports, data migrations, etc.). Run via
 #   docker run … bun run scripts/<name>.ts
 # Not part of the server start path — the entrypoint never invokes these.
-COPY apps/api/scripts ./apps/api/scripts
+COPY --chown=bun:bun apps/api/scripts ./apps/api/scripts
 
 # Uploads directory — receipt photos and transfer screenshots persist here
-# via the named volume mounted by docker-compose.production.yml.
+# via the named volume mounted by docker-compose.production.yml. Created as
+# the runtime user (see above), so it is writable without a chown.
 RUN mkdir -p /app/apps/api/uploads
 
-# Entrypoint runs prisma migrate deploy then exec's into bun.
+# Entrypoint runs prisma migrate deploy then exec's into bun. COPY ignores
+# USER (it always writes as root), which is what /usr/local/bin needs.
 COPY --chmod=0755 apps/api/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-
-# The oven/bun image ships a `bun` user at UID 1000. Hand ownership over so
-# the runtime user can write uploads and read the Prisma client artifacts.
-RUN chown -R bun:bun /app
-
-USER bun
 
 EXPOSE 3001
 

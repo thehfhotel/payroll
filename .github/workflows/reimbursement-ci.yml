@@ -193,6 +193,105 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # The api IMAGE has to boot, not just build. Dockerfile.api's runtime stage
+  # owns /app as the unprivileged `bun` user (UID 1000) at creation time — a
+  # regression there (a COPY without --chown, a step run as root) builds
+  # clean and only fails when the entrypoint's `prisma migrate deploy` or the
+  # first receipt upload hits a root-owned file in production. So: build the
+  # image into the runner's docker (`load: true`), start it against a real
+  # postgres with the same env production gives it, and require /health —
+  # which runs `SELECT 1` through the Prisma client — plus a write into the
+  # uploads dir AS the runtime user. Runs on PRs and on main pushes alike; it
+  # is a merge gate, not a deploy gate (deploy-reimbursement.yml's `contract`
+  # + `build` chain is unchanged, per the note on web-boot-smoke above).
+  # ───────────────────────────────────────────────────────────────────────────
+  api-boot-smoke:
+    name: API image boot smoke (build --load, postgres, /health)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: reimbursement_boot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+
+      - name: Build api into the local docker (no push)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: ./reimbursement
+          file: ./reimbursement/Dockerfile.api
+          push: false
+          load: true
+          tags: reimbursement-api:boot-smoke
+          cache-from: type=gha,scope=reimbursement-v2-api
+          platforms: linux/amd64
+
+      - name: Report image size
+        working-directory: .
+        run: |
+          size=$(docker image inspect reimbursement-api:boot-smoke --format '{{.Size}}')
+          echo "api image size: $((size / 1024 / 1024)) MiB ($size bytes)"
+          echo "### api image size: $((size / 1024 / 1024)) MiB" >> "$GITHUB_STEP_SUMMARY"
+          docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' reimbursement-api:boot-smoke | head -40
+
+      # --network host so the container reaches the service container the way
+      # the test job does: postgres is published on the runner's localhost:5432.
+      # JWT_SECRET / WEB_BASE_URL are the only other vars the api refuses to
+      # start without (apps/api/src/jwt.ts, db.ts); everything optional stays
+      # unset, exactly as a host without the integrations would run it.
+      - name: Boot the api against postgres
+        working-directory: .
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/reimbursement_boot \
+            -e JWT_SECRET=ci-boot-smoke-only \
+            -e WEB_BASE_URL=http://localhost \
+            -e API_PORT=3001 \
+            reimbursement-api:boot-smoke
+
+      - name: Wait for /health
+        working-directory: .
+        run: |
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS --max-time 3 http://localhost:3001/health 2>/dev/null); then
+              echo "/health after ${i}s: $body"
+              echo "$body" | grep -q '"ok":true' && exit 0
+              echo "::error::/health answered but not ok: $body"; docker logs api; exit 1
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' api)" != "true" ]; then
+              echo "::error::api container exited before /health came up"; docker logs api; exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::/health never came up within 60s"; docker logs api; exit 1
+
+      - name: The runtime user owns what it must write and read
+        working-directory: .
+        run: |
+          docker exec api sh -c 'test "$(id -u)" = 1000 || { echo "not uid 1000: $(id -u)"; exit 1; }'
+          docker exec api sh -c 'touch /app/apps/api/uploads/.boot-smoke && rm /app/apps/api/uploads/.boot-smoke'
+          docker exec api sh -c 'test -r /app/apps/api/src/generated/prisma/client.js'
+          docker exec api sh -c 'find /app -maxdepth 3 ! -user bun -print | head -5 | tee /tmp/foreign; test ! -s /tmp/foreign'
+          echo "runtime user is uid 1000, uploads writable, prisma client readable, nothing under /app (depth 3) is foreign-owned"
+
+      - name: Container logs
+        if: always()
+        working-directory: .
+        run: docker logs api 2>&1 | tail -60 || true
+
   build-images:
     name: Build (api + web) — smoke
     runs-on: ubuntu-latest
