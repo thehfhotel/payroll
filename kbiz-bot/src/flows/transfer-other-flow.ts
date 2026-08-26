@@ -289,75 +289,39 @@ async function goToPickerPage(page: Page, n: number): Promise<boolean> {
 }
 
 /**
- * Type the nickname into the picker's search box — best-effort, but NOT silent.
+ * THE PICKER IS NEVER SEARCHED. The flow reads the WHOLE saved-payee book, page
+ * by page, and decides over everything it read — it never types into the
+ * picker's search box (`input[name="acctSearch"]`) and never clicks the
+ * magnifier anchor that triggers it.
  *
- * Every step here has always been best-effort (`.catch(() => {})`), which is
- * how the real defect hid: with the search failing to filter, the flow scanned
- * page 1 of a 2-page list and reported "found 0" as if the payee were not
- * saved. Paging is now the fallback, so a failure here is never fatal — it just
- * has to SAY it happened. Returns null when the search looks like it took, or a
- * human-readable reason when it did not.
+ * Until 2026-08-26 the nickname was typed into that box first, as a
+ * best-effort narrowing, with the page walk as the fallback. That left one
+ * hole (review case "D2"): a filter that returns a NON-EMPTY list which
+ * excludes a second saved account colliding on nickname + bank + last-4 lets
+ * the flow select the intended row without ever SEEING the collision — the
+ * only thing left in front of the money is reimbursement's server-side
+ * uniqueness check over the synced favorites. The bank's search semantics are
+ * not ours to pin (the live box matches account numbers, and typing a nickname
+ * EMPTIED the list on 2026-08-19), so no filter can be trusted to keep every
+ * colliding row visible. Walking the unfiltered book is the only read that
+ * can prove "exactly one destination", so it is the only read this flow does.
  *
- * `rowsBefore` is the row count read BEFORE typing: an unchanged count is the
- * only evidence available that a filter never ran. (A book that fits on one
- * page can change nothing legitimately — hence a log line, never a throw.)
- *
- * The one thing this does more than report: a filter that left the picker with
- * NO rows is undone before returning, because an empty list is never something
- * to decide on — see the comment on that branch.
+ * The one thing done with the search box is READING it, so a filter someone
+ * else left in the modal cannot quietly shrink "the whole book" either: a
+ * non-empty box means the rows on screen are a subset, and a subset is not
+ * something to decide on. Refuses (nothing has been clicked yet) rather than
+ * clearing it — clearing would be typing.
  */
-async function searchPickerFor(page: Page, nickname: string, rowsBefore: number): Promise<string | null> {
+async function assertPickerUnfiltered(page: Page): Promise<void> {
   const search = page.locator('input[name="acctSearch"]').first();
-  if (!(await search.isVisible().catch(() => false))) {
-    return 'no visible search box (input[name="acctSearch"])';
-  }
-  if (!(await search.fill(nickname).then(() => true).catch(() => false))) {
-    return 'the search box (input[name="acctSearch"]) would not accept the nickname';
-  }
-
-  const notes: string[] = [];
-  const trigger = page.locator("a#search-acct-to-btn").first();
-  if (await trigger.isVisible().catch(() => false)) {
-    if (!(await trigger.click({ timeout: 5_000 }).then(() => true).catch(() => false))) {
-      notes.push("the a#search-acct-to-btn click did not land");
-    }
-  } else {
-    notes.push("no visible search trigger (a#search-acct-to-btn)");
-  }
-  if (!(await search.press("Enter").then(() => true).catch(() => false))) {
-    notes.push("Enter on the search box was rejected");
-  }
-  await page.waitForTimeout(1_500);
-
-  const rowsAfter = await pickerRows(page).count();
-  if (rowsAfter === rowsBefore) notes.push(`the row count did not change (${rowsBefore} before, ${rowsAfter} after)`);
-
-  // A filter that hid EVERY row hid the row we came for too, so deciding on
-  // what is left would be the same dead end the paging walk exists to remove —
-  // "expected exactly one matching saved account, found 0" — just reached from
-  // the other side. It takes a search that is not "contains the Display Name":
-  // matchFavoriteRows needs the nickname IN the row text, so a contains-search
-  // can never drop a row that would have matched, and any other semantics can.
-  // Undo the filter and let the walk read the whole book instead. Best-effort
-  // like everything else here: if the rows do not come back, the walk reads an
-  // empty picker and REFUSES, which is where this path already ended.
-  if (rowsAfter === 0 && rowsBefore > 0) {
-    notes.push(`the search emptied the list (${rowsBefore} rows before, 0 after) — clearing the filter`);
-    await search.fill("").catch(() => {});
-    if (await trigger.isVisible().catch(() => false)) {
-      await trigger.click({ timeout: 5_000 }).catch(() => {});
-    }
-    await search.press("Enter").catch(() => {});
-    await page.waitForTimeout(1_500);
-    const restored = await pickerRows(page).count();
-    notes.push(
-      restored > 0
-        ? `filter cleared, ${restored} row(s) back`
-        : "clearing the filter did not bring the rows back",
+  if ((await search.count()) === 0) return;
+  const value = (await search.inputValue().catch(() => "")).trim();
+  if (value) {
+    throw new Error(
+      `The saved-payee picker opened with a search filter already applied (${value.length} char(s)) — ` +
+        "the rows on screen are not the whole saved list. Refusing to select.",
     );
   }
-
-  return notes.length ? notes.join("; ") : null;
 }
 
 /**
@@ -404,20 +368,16 @@ export async function selectFavoritePayee(page: Page, payee: Payee, slug: string
     await page.screenshot({ path: `${SLIPS_DIR}/_${kind}-${slug}.png`, fullPage: true }).catch(() => {});
   };
 
-  // Narrow the list if the search box cooperates — and log it when it doesn't,
-  // because until 2026-08-19 a silently-failed search was indistinguishable in
-  // the logs from "that payee is not saved in KBIZ".
-  const rowsBefore = await pickerRows(page).count();
-  const searchNote = await searchPickerFor(page, nickname, rowsBefore);
-  if (searchNote) {
-    console.log(`   ⚠ picker search did not take: ${searchNote} — paging the whole saved list instead`);
-  }
+  // No search, ever — see assertPickerUnfiltered. The book is read unfiltered.
+  await assertPickerUnfiltered(page);
 
   // Walk EVERY page the paginator offers, accumulating candidates. The walk is
   // not short-circuited by a match on the current page: the ONLY way to know a
   // second saved account also satisfies nickname + bank + last-4 is to look at
   // the rest of the list, and the old single-page read is precisely how a
-  // page-1 last-4 collision could pass as the unique match (probe case D).
+  // page-1 last-4 collision could pass as the unique match (probe case D) —
+  // and a search filter is how a page-1 read could pass WITH the walk in place
+  // (probe case D2).
   const scans: FavoritePageScan[] = [];
   let current = 1;
   let pagingNote: string | null = null;
@@ -470,9 +430,7 @@ export async function selectFavoritePayee(page: Page, payee: Payee, slug: string
     throw new Error(
       `Favorite "${nickname}" (${shown}, ${payee.bank}): expected exactly one matching ` +
         `saved account, found ${decision.destinationCount}. Refusing to select. ` +
-        `(scanned ${scope}` +
-        (searchNote ? `; picker search did not take: ${searchNote}` : "") +
-        ")",
+        `(scanned ${scope})`,
     );
   }
 

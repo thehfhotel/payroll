@@ -31,8 +31,10 @@
       anchor exists only for pages you are not on) plus `li > a.prev` /
       `a.next` anchors carrying no text.
    6. The search box is `input[name=acctSearch]`; its trigger is
-      `a#search-acct-to-btn`. Both are best-effort in the flow, which is how a
-      silent search failure became invisible.
+      `a#search-acct-to-btn`. The flow used to type into both (best-effort,
+      which is how a silent search failure became invisible); since 2026-08-26
+      it NEVER does — it only reads the box, refusing a pre-applied filter, and
+      walks the unfiltered book. Kept here so the probe can prove that.
 
   INTERACTIVE, on purpose: the inline script below re-renders rows on a page
   click, on a search, and fills `input[name=accountTo]` when a row's account
@@ -60,13 +62,13 @@
     &search=broken   the trigger anchor is removed and Enter does nothing, so
                      the row set never changes — the SILENT search failure
                      that made page 2 unreachable. Default is a working search.
-    &search=acctonly the search WORKS but matches account numbers only, so the
-                     Display Name filters the list down to NOTHING — including
-                     the target. The flow must clear its own filter and page the
-                     book instead of refusing "found 0". ADVERSARIAL: the real
-                     capture's search does not filter at all (that is
-                     &search=broken); this models the other way a best-effort
-                     search can hide the row.
+    &search=acctonly the search WORKS but matches account numbers only, so a
+                     typed Display Name would filter the list down to NOTHING
+                     — including the target. ADVERSARIAL: the real capture's
+                     search does not filter at all (that is &search=broken).
+                     Since 2026-08-26 the flow never types, so every `search=`
+                     variant must reach the SAME outcome — the probe asserts
+                     the box was never typed into or triggered in any of them.
     &pager=stalled   the numeric page anchors are rendered but inert: page 2 is
                      advertised and never arrives. A partial scan is not the
                      list, so the flow must refuse.

@@ -239,9 +239,10 @@ describe("ambiguity is reported, never resolved", () => {
 // used to do. The operator's devtools capture of 2026-08-19
 // (test/fixtures/kbiz-payee-picker.dom.html) proves the picker pages at TEN
 // rows: "บัญชีที่ 1-10 จาก 14 บัญชี", 2 pages. The ฿1 test destination sorts
-// to ~row 11, so page 1 does not contain it, and every step of the picker's
-// search box is best-effort — a silent search failure made the row
-// unreachable.
+// to ~row 11, so page 1 does not contain it — and the picker's search box,
+// which the flow typed into as a best-effort narrowing until 2026-08-26,
+// silently failed to filter, leaving the row unreachable. The search is gone
+// from the flow now (review case D2): the book is walked unfiltered.
 //
 // The rows below mirror the fixture exactly (same placeholder book, same
 // order), so the pure decision and the browser probe are describing one
@@ -314,9 +315,10 @@ describe("the picker paginates — page 1 is not the list", () => {
     expect(d.pagesScanned).toBe(2);
   });
 
-  it("a WORKING search (one filtered page holding the row) reaches the same decision", () => {
-    // The search box narrows the list to page 1 of a 1-page result. Same
-    // outcome, one page — pagination is the fallback, not the only path.
+  it("a one-page book holding only the row reaches the same decision", () => {
+    // The decision does not care how many pages the book has — one page, one
+    // row, same outcome. (This used to describe a WORKING search filter; the
+    // flow no longer searches, but the pure rule is unchanged.)
     const filtered = decideFavoriteSelection([{ page: 1, rowTexts: [TARGET_ROW] }], tCriteria);
     expect(filtered.outcome).toBe("one");
     expect(filtered.target).toEqual({ page: 1, rowIndex: 0, destinationKey: "1111111117" });
@@ -466,8 +468,6 @@ describe("test/fixtures/kbiz-payee-picker.dom.html — provenance, scrub, select
       "div class=\"lists\"", // rows
       "c-bold c-green pointer", // the account link that SELECTS the payee
       "pagination-template", // the paginator
-      'name="acctSearch"', // the search box
-      'id="search-acct-to-btn"', // its trigger
       "input-search-acc", // the icon that opens the picker
       'name="accountTo"', // the field the selection must fill
       "hidden-ip-pro", // the double-render classes
@@ -475,6 +475,14 @@ describe("test/fixtures/kbiz-payee-picker.dom.html — provenance, scrub, select
     ]) {
       expect(fixture).toContain(sel);
     }
+  });
+
+  it("keeps the search box the flow must NEVER type into (it is read, to refuse a pre-applied filter)", () => {
+    // The capture has a working search box; the flow deliberately ignores it
+    // (review case D2 — see assertPickerUnfiltered in the flow). The fixture
+    // keeps it so the probe can prove the flow never touches it.
+    expect(fixture).toContain('name="acctSearch"');
+    expect(fixture).toContain('id="search-acct-to-btn"');
   });
 
   it("carries no real bank data — every account-shaped token is a placeholder", () => {
@@ -622,7 +630,7 @@ describe("transfer-other-flow.ts wiring — the favorite path's refusals", () =>
   });
 
   it("walks the paginator with the same rules the read-only scrape uses", () => {
-    const pager = src.slice(src.indexOf("async function goToPickerPage"), src.indexOf("async function searchPickerFor"));
+    const pager = src.slice(src.indexOf("async function goToPickerPage"), src.indexOf("* THE PICKER IS NEVER SEARCHED"));
     // whole-text-anchored numeric anchor (so "2" never matches "12")…
     expect(src).toContain("`^\\\\s*${n}\\\\s*$`");
     // …a real row swap, not a fixed sleep…
@@ -654,29 +662,48 @@ describe("transfer-other-flow.ts wiring — the favorite path's refusals", () =>
     );
   });
 
-  it("a failed picker search is LOGGED and never thrown — paging is the fallback", () => {
-    const search = src.slice(src.indexOf("async function searchPickerFor"), src.indexOf("* Select a SAVED payee"));
-    expect(search).not.toContain("throw");
-    expect(search).toContain("no visible search trigger (a#search-acct-to-btn)");
-    expect(search).toContain("the row count did not change");
-    // The flow says so out loud, in the same style as the per-page scan line.
-    expect(fn).toContain("console.log(`   ⚠ picker search did not take:");
+  it("NEVER types into the picker's search box — the whole unfiltered book is walked instead", () => {
+    // Review case D2 (2026-08-26): a search filter that returns a NON-EMPTY
+    // list which excludes a second saved account colliding on nickname + bank
+    // + last-4 would let the walk select the intended row without ever SEEING
+    // the collision. The bank's search semantics are not ours to pin (the
+    // live box matches account numbers), so the flow uses no filter at all.
+    // Re-introducing the old best-effort search — or any typing — fails here.
+    expect(src).not.toContain("searchPickerFor");
+    expect(src).not.toContain("search-acct-to-btn");
+    expect(src).not.toContain("picker search did not take");
+    // The selection function's only writes to the page are the numeric
+    // page-anchor clicks and the one account-link click on the verified row.
+    for (const write of [".fill(", ".type(", ".pressSequentially(", ".press(", ".keyboard.", ".selectOption("]) {
+      expect(fn).not.toContain(write);
+    }
+    // The guard runs where the search used to, BEFORE the walk starts.
+    expect(fn).toContain("await assertPickerUnfiltered(page);");
+    expect(fn.indexOf("await assertPickerUnfiltered(page);")).toBeLessThan(
+      fn.indexOf("const scans: FavoritePageScan[] = []"),
+    );
+    // The per-page scan line still narrates the walk.
     expect(fn).toContain("console.log(\n      `   scanned ${rowTexts.length} saved rows on picker page ${current}, `");
   });
 
-  it("a filter that emptied the picker is UNDONE, not decided on", () => {
-    // The other way a best-effort search hides the row: it filters on
-    // something that is not the Display Name, so the nickname narrows the list
-    // to nothing and "found 0" comes back for a payee that IS saved. An empty
-    // picker is never something to decide on — clear the box and let the walk
-    // read the book. (Probe case G drives this against the captured markup.)
-    const search = src.slice(src.indexOf("async function searchPickerFor"), src.indexOf("* Select a SAVED payee"));
-    expect(search).toContain("rowsAfter === 0 && rowsBefore > 0");
-    expect(search).toContain("the search emptied the list");
-    expect(search).toContain('await search.fill("")');
-    expect(search).toContain("clearing the filter did not bring the rows back");
-    // Still best-effort: a search step never throws, and never blocks the walk.
-    expect(search).not.toContain("throw");
+  it("the search box is only ever READ — a pre-applied filter REFUSES, it is never cleared by typing", () => {
+    // A filter someone else left in the modal would make the rows on screen a
+    // subset of the book, and a subset is not something to decide on. The
+    // guard reads the box and refuses; clearing it would itself be typing.
+    const guard = src.slice(src.indexOf("* THE PICKER IS NEVER SEARCHED"), src.indexOf("* Select a SAVED payee"));
+    expect(guard).toContain("async function assertPickerUnfiltered");
+    expect(guard).toContain('input[name="acctSearch"]');
+    expect(guard).toContain("inputValue()");
+    expect(guard).toContain("throw new Error(");
+    expect(guard).toContain("Refusing to select");
+    for (const write of [".fill(", ".type(", ".pressSequentially(", ".press(", ".click(", ".keyboard."]) {
+      expect(guard).not.toContain(write);
+    }
+    // The search box is named NOWHERE else in the driver: every reference to
+    // it in the whole module lives inside that read-only guard.
+    const count = (hay: string) => hay.split("acctSearch").length - 1;
+    expect(count(guard)).toBeGreaterThan(0);
+    expect(count(src)).toBe(count(guard));
   });
 
   it("the picker driver stays out of the pure core — favorites-core.ts has no browser in it", () => {

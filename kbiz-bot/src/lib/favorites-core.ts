@@ -352,10 +352,12 @@ export function matchFavoriteRows(rowTexts: string[], criteria: FavoriteRowCrite
  *
  * So "read div.lists once and match" only ever sees PAGE ONE. The saved
  * account a ฿1 test transfer wants sorts to roughly row 11 of 13 — page 2 —
- * and every step of the picker's search box is best-effort
- * (`.catch(() => {})`), so a search that silently fails to filter left the
+ * and every step of the picker's search box was best-effort
+ * (`.catch(() => {})`), so a search that silently failed to filter left the
  * target STRUCTURALLY UNREACHABLE and the flow refusing with "expected exactly
- * one matching saved account, found 0".
+ * one matching saved account, found 0". (Since 2026-08-26 the driver does not
+ * search at all — it walks the unfiltered book; see assertPickerUnfiltered in
+ * transfer-other-flow.ts for why a filter can hide a collision.)
  *
  * This is the pure half of the fix: the driver (transfer-other-flow.ts) walks
  * the paginator the way collectFavorites already does and hands over one scan
