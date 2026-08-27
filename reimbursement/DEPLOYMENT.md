@@ -14,6 +14,8 @@ GitHub Actions (ubuntu-latest)
     ▼
 evergreen (Ubuntu)
   ├── reimbursement-v2 user (locked password, ssh-key only, in `docker` group)
+  │     ├── key pinned to /srv/run-deploy-reimbursement.sh (forced command,
+  │     │   seven deploy verbs — never a shell)
   │     └── ~/production/{docker-compose.yml, .env}
   │
   └── docker daemon
@@ -92,16 +94,45 @@ cat ~/.ssh/reimbursement-v2-deploy       # → goes into REIMB_SSH_PRIVATE_KEY s
 ### 2. Provision the deploy user on evergreen
 
 ```bash
-scp deploy/evergreen-setup.sh evergreen:/tmp/
+scp deploy/evergreen-setup.sh deploy/run-deploy-reimbursement.sh evergreen:/tmp/
 ssh evergreen
 sudo DEPLOY_SSH_PUBKEY='ssh-ed25519 AAAA… gh-actions deploy@reimbursement-v2' \
   bash /tmp/evergreen-setup.sh
 ```
 
-The script is idempotent. It creates a `deploy` system user with **password
-authentication locked** (`passwd -l`), authorizes the public key, and adds
-the user to the `docker` group. Re-run any time you need to add a second
-authorized key or recreate the app directory.
+The script is idempotent. It creates the `reimbursement-v2` system user with
+**password authentication locked** (`passwd -l`), adds it to the `docker`
+group, installs `/srv/run-deploy-reimbursement.sh` (root-owned), and
+authorizes the public key **pinned to that shim**:
+
+```
+command="/srv/run-deploy-reimbursement.sh",restrict ssh-ed25519 AAAA… gh-actions deploy@reimbursement-v2
+```
+
+Re-run any time you need to add a second authorized key, update the shim, or
+recreate the app directory. It refuses to proceed if it finds the key already
+present *without* the forced command — fix that line by hand first.
+
+#### The forced-command shim
+
+The key can only ever run the shim, and the shim only accepts one bare verb
+as the remote command (anything else, including a bare `ssh` with a script on
+stdin, is refused with exit 2 and logged to
+`/var/log/deploy/deploy-reimbursement-<ts>.log`):
+
+| Verb | What it does |
+|---|---|
+| `smoke` | prints `connected as reimbursement-v2 on evergreen` |
+| `write-compose` | stdin → `~/production/docker-compose.yml` (0644, atomic, must contain `services:`) |
+| `write-env` | stdin → `~/production/.env` (0600, atomic; every line must be `KEY=VALUE`, must contain `IMAGE_TAG=`) |
+| `ghcr-login` | stdin line 1 = user, line 2 = token → `docker login ghcr.io` |
+| `rollout` | `docker compose pull && docker compose up -d --remove-orphans` |
+| `health` | api `/health` inside the container, then web → api on `127.0.0.1:5800/healthz/upstream` |
+| `prune` | `docker image prune -f` |
+
+`deploy-reimbursement.yml` sends exactly one verb per step. The source of
+truth is `deploy/run-deploy-reimbursement.sh` in this repo; the installed copy
+must match it.
 
 ### 3. Pin the host key
 
@@ -267,8 +298,9 @@ Wire into cron / systemd-timer on evergreen for automatic snapshots.
 
 - **GH-hosted runner + SSH** instead of a self-hosted runner: no long-lived
   agent on evergreen, no daemon to keep updated, blast radius of a
-  compromised workflow run is "what `reimbursement-v2@evergreen` can do inside the
-  docker socket" — not host-level.
+  compromised workflow run is "the seven verbs of
+  `/srv/run-deploy-reimbursement.sh`" — the key is a forced command, not a
+  shell, so it cannot reach the docker socket directly.
 - **Cloudflare Access service token** instead of opening SSH to the
   internet: zero net-new attack surface. Same Access policy that lets your
   laptop in lets the workflow in.
