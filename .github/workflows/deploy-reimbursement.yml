@@ -154,6 +154,17 @@ jobs:
   #
   # Connection path:  GH-hosted runner → cloudflared (Cloudflare Access
   # service token) → SSH (deploy user, ed25519 key) → evergreen.
+  #
+  # The reimbursement-v2 key on evergreen is pinned in authorized_keys to
+  # command="/srv/run-deploy-reimbursement.sh",restrict — the same forced-
+  # command pattern every /home/deploy key uses. That shim is an allow-list
+  # dispatcher on the remote command: each step below sends ONE bare verb
+  # (smoke, write-compose, write-env, ghcr-login, rollout, health, prune)
+  # and anything with a body ships it on stdin. Any other remote command —
+  # or a bare `ssh evergreen` with a script on stdin — is refused with
+  # exit 2 on the host and logged under /var/log/deploy/. The shim, not
+  # this file, owns the deploy dir (/home/reimbursement-v2/production),
+  # file modes, and the health-check details.
   # ──────────────────────────────────────────────────────────────────────
   deploy:
     concurrency:
@@ -171,7 +182,6 @@ jobs:
     env:
       SSH_HOST: evergreen.thehfhotel.org
       SSH_USER: reimbursement-v2
-      DEPLOY_DIR: /home/reimbursement-v2/production
 
     steps:
       - name: Checkout (compose file only)
@@ -246,7 +256,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts ~/.ssh/config
 
       - name: Smoke-test SSH
-        run: ssh evergreen "echo connected as \$(id -un) on \$(hostname)"
+        run: ssh evergreen smoke
 
       # Closes the race where two near-simultaneous pushes (dependabot bursts
       # are the common case) queue two deploy runs against `concurrency:
@@ -351,8 +361,7 @@ jobs:
         if: success() && steps.head-check.outputs.proceed != 'false'
         run: |
           set -euo pipefail
-          ssh evergreen "mkdir -p ${DEPLOY_DIR}"
-          scp reimbursement/docker-compose.production.yml evergreen:${DEPLOY_DIR}/docker-compose.yml
+          ssh evergreen write-compose < reimbursement/docker-compose.production.yml
 
       - name: Materialize .env from secrets
         if: success() && steps.head-check.outputs.proceed != 'false'
@@ -424,7 +433,7 @@ jobs:
 
           # The here-doc is built locally so secrets never appear in shell
           # invocation logs on the remote host.
-          ssh evergreen "umask 077 && cat > ${DEPLOY_DIR}/.env && chmod 600 ${DEPLOY_DIR}/.env" <<EOF
+          ssh evergreen write-env <<EOF
           NODE_ENV=production
           IMAGE_TAG=${IMAGE_TAG}
 
@@ -478,84 +487,31 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
+        # User on stdin line 1, token on line 2. The token used to ride in
+        # the remote command string itself, where it sat in `ps` output on
+        # the host for the duration of the login.
         run: |
-          ssh evergreen "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
+          set -euo pipefail
+          printf '%s\n%s\n' "${GHCR_USER}" "${GHCR_TOKEN}" | ssh evergreen ghcr-login
 
       - name: Pull images and roll out
         if: success() && steps.head-check.outputs.proceed != 'false'
-        run: |
-          set -euo pipefail
-          ssh evergreen <<'REMOTE'
-          set -euo pipefail
-          cd /home/reimbursement-v2/production
-          docker compose pull
-          docker compose up -d --remove-orphans
-          REMOTE
+        run: ssh evergreen rollout
 
       - name: Health check
         if: success() && steps.head-check.outputs.proceed != 'false'
-        # NB: avoid `exit 0` mid-heredoc — that closes ssh's stdin while the
-        # local end is still writing the rest of the script, which yields
-        # SIGPIPE and a non-zero ssh exit. Track outcomes in flags and let
-        # the script reach its natural end.
-        run: |
-          set -euo pipefail
-          ssh evergreen <<'REMOTE'
-          set -uo pipefail
-
-          api_ok=0
-          for i in $(seq 1 30); do
-            if docker exec reimbursement-v2-api curl -fsS --max-time 3 http://localhost:3001/health >/dev/null 2>&1; then
-              echo "api healthy after ${i}s"
-              api_ok=1
-              break
-            fi
-            sleep 2
-          done
-
-          if [ "$api_ok" != 1 ]; then
-            echo "::error::api /health never came up"
-            docker logs --tail=80 reimbursement-v2-api || true
-            exit 1
-          fi
-
-          # End-to-end via the host port the cloudflared tunnel routes to.
-          # Hitting reimbursement.thehfhotel.org would still resolve to the
-          # OLD app until the cutover ingress flip — checking 127.0.0.1:5800
-          # directly is unambiguous: that's exactly the new web container.
-          #
-          # /healthz/upstream, NOT /healthz: the bare path is nginx answering
-          # for itself (always 200 as long as the container is up) and says
-          # nothing about the api behind it — exactly how the 2026-08-10
-          # outage hid: all containers "healthy", every /api/ request 502.
-          # /healthz/upstream proxies through to the api, same as real
-          # traffic and same as the container HEALTHCHECK in
-          # docker-compose.production.yml. See apps/web/nginx.conf.
-          edge_ok=0
-          for i in $(seq 1 30); do
-            if curl -fsS --max-time 3 http://127.0.0.1:5800/healthz/upstream >/dev/null 2>&1; then
-              echo "web → api healthy on :5800 after ${i}s"
-              edge_ok=1
-              break
-            fi
-            sleep 2
-          done
-
-          if [ "$edge_ok" != 1 ]; then
-            echo "::error::web :5800 health check failed"
-            docker logs --tail=80 reimbursement-v2-web || true
-            docker logs --tail=80 reimbursement-v2-api || true
-            exit 1
-          fi
-
-          echo "deploy looks healthy."
-          REMOTE
+        # The check lives in the shim's `health` verb: api /health inside the
+        # container first, then web → api through 127.0.0.1:5800/healthz/
+        # upstream — NOT bare /healthz, which is nginx answering for itself
+        # and hid the 2026-08-10 outage (all containers "healthy", every
+        # /api/ request 502). Its ::error:: annotations surface here as-is.
+        run: ssh evergreen health
 
       # Housekeeping AFTER the health gate: pruning inside the rollout step put
       # ~5-8s of dead-image cleanup on the critical path before health checks.
       - name: Prune old images (non-blocking)
         if: success() && steps.head-check.outputs.proceed != 'false'
-        run: ssh evergreen "docker image prune -f" || true
+        run: ssh evergreen prune || true
 
       - name: Summary
         if: success() && steps.head-check.outputs.proceed != 'false'
