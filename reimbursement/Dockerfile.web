@@ -7,7 +7,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — install workspace deps with the lockfile pinned
 # ─────────────────────────────────────────────────────────────────────────────
-FROM oven/bun:1.3 AS deps
+FROM oven/bun:1.4 AS deps
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ RUN bun install --frozen-lockfile
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — build the Vite SPA
 # ─────────────────────────────────────────────────────────────────────────────
-FROM oven/bun:1.3 AS build
+FROM oven/bun:1.4 AS build
 
 WORKDIR /app
 
