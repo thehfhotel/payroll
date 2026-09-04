@@ -2,9 +2,27 @@ import type { Page } from "playwright";
 import { gotoAuthenticated } from "../lib/session";
 import { scrapeRegisteredAccounts } from "../lib/scrape-registered";
 import { readBeneficiaryAccountNumbers } from "../lib/read-xlsx";
+import { nextTimeoutError } from "../lib/next-timeout";
 import { waitForMobileConfirmation } from "../wait";
 
 const URL = "https://kbiz.kasikornbank.com/menu/setting/account-list/account-payroll";
+
+/**
+ * K BIZ's Next, in both languages. The session has run THAI since 2026-08-12
+ * (`login.jsp?lang=th`) and the Thai label for Next is **"ต่อไป"** — verified
+ * live on fundtranfer-other (2026-08-12) and on payroll/upload-transfer
+ * (2026-09-04 probe: `a.btn.fixed-width.btn-gradient` "ต่อไป") — NOT "ถัดไป",
+ * which is all this flow used to match (the same guess that crashed
+ * transfer-payroll on 2026-09-04). This account-payroll page itself has not
+ * been probed under Thai; verified labels only, no more guesses.
+ *
+ * Used with the `.disabled-button` filter carried over from that one verified
+ * Next locator: KBIZ renders its Next anchor VISIBLE-but-disabled while the
+ * form is incomplete, `:visible` matches it anyway, and Playwright's
+ * enabled-check does not apply to an `<a>`.
+ */
+const NEXT_SELECTOR =
+  'a:has-text("Next"):visible, a:has-text("ต่อไป"):visible, button:has-text("Next"):visible, button:has-text("ต่อไป"):visible, #nextBtn:visible';
 
 export type FlowResult =
   | { success: true; finalUrl: string }
@@ -63,10 +81,20 @@ export async function runAddPayrollFlow(page: Page, xlsxAbs: string): Promise<Fl
   await page.waitForTimeout(1500);
 
   console.log("→ Click Next");
-  await page
-    .locator('a:has-text("Next"):visible, a:has-text("ถัดไป"):visible, #nextBtn:visible')
-    .first()
-    .click();
+  const next = page
+    .locator(NEXT_SELECTOR)
+    .filter({ hasNot: page.locator(".disabled-button") })
+    .first();
+  try {
+    await next.waitFor({ state: "visible", timeout: 30_000 });
+  } catch (e) {
+    // PRE-ARM failure, and provably so: on THIS page Next itself is what arms
+    // the push, and we never clicked it. So this is a plain { success:false }
+    // with NO pushMayBeLive — the caller releases the conservative lock as
+    // "confirmed-failed", unlike the ambiguous post-click exit below.
+    return { success: false, error: await nextTimeoutError(page, "add-payroll-next-timeout", xlsxAbs, e) };
+  }
+  await next.click();
 
   // Race popups vs review screen
   const cannotAddPopup = page.locator('text=/Account cannot be added|ไม่สามารถเพิ่มบัญชี/i');

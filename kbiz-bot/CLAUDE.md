@@ -102,6 +102,37 @@ root `bun test` is in before `kbiz-bot/node_modules` exists.
 - The KBIZ session runs THAI (`login.jsp?lang=th`) so scraped account names
   are Thai. Bank matching must go through `aliasesForBank()` (EN↔TH) — never
   a bare substring.
+- **Thai "Next" is "ต่อไป", not "ถัดไป"** (verified live on fundtranfer-other
+  2026-08-12), and that verified locator also filters out `.disabled-button` —
+  KBIZ renders Next visible-but-disabled while a form is incomplete, and
+  Playwright's enabled-check does not apply to an `<a>`.
+  **payroll/upload-transfer, probed read-only 2026-09-04 after the incident:**
+  the file input is `input.custom-file-upload-hidden[name=uploadfile]`; Next is
+  `a.btn.fixed-width.btn-gradient` "ต่อไป" and exists ONLY after a file is
+  selected (no "ถัดไป"/"Next" anywhere); dialogs are `#popup-*` with
+  `.popup-modal-close` buttons, and a hidden `a.btn-gradient` "ยืนยัน" lives in
+  one of them. The payroll flows had guessed "ถัดไป", so the first Next after a
+  payroll upload timed out and crashed the queue item on 2026-09-04. Both
+  payroll flows now match the verified labels only (`NEXT_SELECTOR`, pinned by
+  `test/payroll-labels.test.ts`) and carry the disabled filter; transfer-payroll
+  additionally matches Confirm bilingually (`CONFIRM_SELECTOR` — a SUBSTRING
+  match, so it is re-checked against the refusal popups before the arming
+  click, since KBIZ's own refusal dialogs carry a "ยืนยัน" anchor), while
+  add-payroll has no Confirm step and detects the review screen by text. The
+  review screen after Next and the account-payroll page are still unprobed
+  under Thai — the next live run is their verification.
+- **K BIZ payroll deadline (page copy, 2026-09-04):** a batch must be approved
+  by 17:00 at least one day before the pay date, or KBIZ refuses it.
+- **`page.evaluate` + tsx:** esbuild's keepNames wraps any NAMED inner function
+  (`const f = () => …`) inside an evaluate callback with `__name(...)`, which
+  does not exist in the browser (`ReferenceError: __name is not defined`). Keep
+  evaluate callbacks free of inner named functions, or pass the page-side code
+  as a string.
+- A payroll Next that never appears now writes a full-page PNG next to the
+  slips (`KBIZ_SLIPS_DIR`, `src/lib/next-timeout.ts`). That shot is unmasked
+  page content, and the dir is re-pointable at the shared cross-stack mount
+  (the `./data/slips` nested bind drafted, commented out, in `EVERGREEN.md`) — if you
+  ever flip that bind on, give these screenshots a container-local dir instead.
 - fundtranfer-other needs a 1600px viewport (1366 is a breakpoint edge where
   rows render non-visible).
 - The saved-payee picker opens from `a.input-search-acc`; rows are `div.lists`
