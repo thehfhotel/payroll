@@ -119,8 +119,10 @@ root `bun test` is in before `kbiz-bot/node_modules` exists.
   match, so it is re-checked against the refusal popups before the arming
   click, since KBIZ's own refusal dialogs carry a "ยืนยัน" anchor), while
   add-payroll has no Confirm step and detects the review screen by text. The
-  review screen after Next and the account-payroll page are still unprobed
-  under Thai — the next live run is their verification.
+  review screen after Next and its Confirm ("ยืนยัน") were verified by the live
+  payroll run of 2026-09-04 (Next matched at once, Confirm armed the push, the
+  tap landed, item done). The account-payroll page is still unprobed under
+  Thai — its next live add-payroll run is the verification.
 - **K BIZ payroll deadline (page copy, 2026-09-04):** a batch must be approved
   by 17:00 at least one day before the pay date, or KBIZ refuses it.
 - **`page.evaluate` + tsx:** esbuild's keepNames wraps any NAMED inner function
