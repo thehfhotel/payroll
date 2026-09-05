@@ -2,7 +2,7 @@
 # this base image tag — the image ships that version's browsers, and a newer
 # library refuses to launch them (bot crashloops with "Executable doesn't
 # exist"). Bump both together.
-FROM mcr.microsoft.com/playwright:v1.62.1-noble
+FROM mcr.microsoft.com/playwright:v1.63.0-noble
 
 # kbiz-bot lives at /app/kbiz-bot so resolve("..", "data", ...) hits /app/data,
 # matching how docker-compose mounts the shared data volume into both
